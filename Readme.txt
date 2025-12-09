@@ -38,3 +38,12 @@ For production deployment:
 - API keys are sensitive credentials - handle them carefully
 - User Secrets are only for local development
 - Production environments should use secure key management systems
+
+Default Admin account:
+Email: admin@example.com
+Password: Admin123!
+
+The ultimate goal is for the user to upload personal medical files in the system, 
+have it automatically anonymize the text, convert it to a txt file, so that the data 
+can be uploaded into the Grok AI.  Any medical questions will have the context of 
+the data for that individual, while maintaining privacy.
