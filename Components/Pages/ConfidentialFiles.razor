@@ -1,0 +1,313 @@
+@page "/confidential-files"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Guest")]
+@using System.ComponentModel.DataAnnotations
+@using System.Text
+@using System.IO
+@using System.Linq
+@using System.Collections.Generic
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using GrokBlazorApp.Data
+@using GrokBlazorApp.Services
+@inject IDbContextFactory<ApplicationDbContext> DbContextFactory
+@inject IServiceScopeFactory ScopeFactory
+@inject NavigationManager Navigation
+@inject ILogger<ConfidentialFiles> Logger
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject ILocalTextExtractionService TextExtractionService
+@inject IJSRuntime JSRuntime
+@inject IAnonymizerService AnonymizerService
+
+<PageTitle>Confidential Files</PageTitle>
+
+<h3>Upload Confidential Files</h3>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <h4>Upload and Anonymize</h4>
+        <EditForm Model="@uploadModel" OnValidSubmit="HandleUpload" FormName="confidentialUploadForm">
+            <DataAnnotationsValidator />
+            <ValidationSummary />
+
+            <div class="mb-3">
+                <InputFile OnChange="OnFileSelected" class="form-control" accept="*/*" />
+            </div>
+
+            <div class="mb-3">
+                <InputText @bind-Value="uploadModel.Label" class="form-control" placeholder="Enter a label for the file" />
+            </div>
+
+            <button type="submit" class="btn btn-primary" disabled="@isUploading">
+                @if (isUploading)
+                {
+                    <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    @:Processing...
+                }
+                else
+                {
+                    @:Upload Confidential File
+                }
+            </button>
+        </EditForm>
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger mt-3">@errorMessage</div>
+        }
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <h4>Your Confidential Files</h4>
+        @if (confidentialFiles.Any())
+        {
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Select</th>
+                        <th>Label</th>
+                        <th>File Name</th>
+                        <th>Upload Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var file in confidentialFiles)
+                    {
+                        <tr>
+                            <td>
+                                <input type="checkbox"
+                                       checked="@selectedFileIds.Contains(file.Id)"
+                                       @onchange="(ChangeEventArgs e) => OnFileSelectionChanged(e, file.Id)" />
+                            </td>
+                            <td>@file.Label</td>
+                            <td>@file.FileName</td>
+                            <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <button @onclick="DownloadSelectedFiles"
+                    class="btn btn-secondary mt-3"
+                    disabled="@(!selectedFileIds.Any())">
+                Download Selected
+            </button>
+        }
+        else
+        {
+            <p>No confidential files uploaded yet.</p>
+        }
+    </div>
+</div>
+
+@code {
+    private List<UserFile> confidentialFiles = new();
+    private HashSet<int> selectedFileIds = new();
+    private string errorMessage = string.Empty;
+    private bool isUploading = false;
+    private ConfidentialUploadModel uploadModel = new();
+
+    private class ConfidentialUploadModel
+    {
+        public IBrowserFile? File { get; set; }
+
+        [Required]
+        public string Label { get; set; } = string.Empty;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadConfidentialFiles();
+    }
+
+    private async Task LoadConfidentialFiles()
+    {
+        selectedFileIds.Clear();
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        if (user.Identity?.IsAuthenticated == true)
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+
+            if (!string.IsNullOrEmpty(userId))
+            {
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                var allFiles = await dbContext.UserFiles
+                    .Where(f => f.UserId == userId)
+                    .OrderByDescending(f => f.UploadDate)
+                    .ToListAsync();
+
+                confidentialFiles = allFiles
+                    .Where(f => Path.GetExtension(f.FileName).Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                                && Path.GetFileName(f.FileName).StartsWith("AN-", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                Logger.LogInformation("Loaded {Count} confidential files for user {UserId}.", confidentialFiles.Count, userId);
+            }
+            else
+            {
+                Logger.LogWarning("User ID is null in LoadConfidentialFiles.");
+            }
+        }
+        else
+        {
+            Logger.LogWarning("User not authenticated in LoadConfidentialFiles.");
+        }
+    }
+
+    private void OnFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        if (isSelected)
+            selectedFileIds.Add(fileId);
+        else
+            selectedFileIds.Remove(fileId);
+    }
+
+    private async Task DownloadSelectedFiles()
+    {
+        if (!selectedFileIds.Any()) return;
+
+        try
+        {
+            var filesToDownload = confidentialFiles.Where(f => selectedFileIds.Contains(f.Id)).ToList();
+            foreach (var file in filesToDownload)
+            {
+                if (file.Content != null && file.Content.Length > 0)
+                {
+                    var base64 = Convert.ToBase64String(file.Content);
+                    await JSRuntime.InvokeVoidAsync("downloadFile", file.FileName, base64);
+                }
+            }
+            selectedFileIds.Clear();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error downloading files.");
+            errorMessage = "Error downloading files: " + ex.Message;
+        }
+    }
+
+    private async Task HandleUpload()
+    {
+        errorMessage = string.Empty;
+        if (uploadModel.File == null || string.IsNullOrWhiteSpace(uploadModel.Label))
+        {
+            return;
+        }
+
+        isUploading = true;
+
+        try
+        {
+            var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+            var user = authState.User;
+
+            if (!user.Identity?.IsAuthenticated == true)
+            {
+                Navigation.NavigateTo("/Identity/Account/Login", forceLoad: true);
+                return;
+            }
+
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+
+            if (string.IsNullOrEmpty(userId))
+            {
+                errorMessage = "Unable to retrieve user ID.";
+                return;
+            }
+
+            using var stream = uploadModel.File.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
+            using var memoryStream = new MemoryStream();
+            await stream.CopyToAsync(memoryStream);
+            var fileBytes = memoryStream.ToArray();
+
+            var extractedText = await TextExtractionService.ExtractTextAsync(uploadModel.File.Name, fileBytes);
+
+            if (string.IsNullOrWhiteSpace(extractedText) ||
+                extractedText.StartsWith("Error extracting text:", StringComparison.OrdinalIgnoreCase) ||
+                extractedText.Equals("Unsupported file type for text extraction.", StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = "Could not extract text from the uploaded file.";
+                return;
+            }
+
+            var anonymizedText = AnonymizerService.AnonymizeText(extractedText);
+
+            var txtFileName = Path.ChangeExtension(uploadModel.File.Name ?? "confidential.txt", ".txt");
+            var anonymizedFileName = GetAnonymizedFileName(txtFileName);
+
+            var confidentialFile = new UserFile
+            {
+                UserId = userId,
+                FileName = anonymizedFileName,
+                Label = uploadModel.Label,
+                Content = Encoding.UTF8.GetBytes(anonymizedText),
+                UploadDate = DateTime.UtcNow
+            };
+
+            using var dbContext = await DbContextFactory.CreateDbContextAsync();
+            dbContext.UserFiles.Add(confidentialFile);
+            await dbContext.SaveChangesAsync();
+
+            uploadModel = new ConfidentialUploadModel();
+
+            await LoadConfidentialFiles();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error during confidential file upload.");
+            errorMessage = $"Upload failed: {ex.Message}";
+        }
+        finally
+        {
+            isUploading = false;
+        }
+    }
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        uploadModel.File = e.File;
+        uploadModel.Label = e.File.Name;
+    }
+
+    private static string GetAnonymizedFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return "AN-anonymized.txt";
+        }
+
+        var directory = Path.GetDirectoryName(fileName);
+        var nameOnly = Path.GetFileName(fileName);
+
+        if (nameOnly.StartsWith("AN-", StringComparison.OrdinalIgnoreCase))
+        {
+            return fileName;
+        }
+
+        var anonymizedName = "AN-" + nameOnly;
+        return string.IsNullOrEmpty(directory)
+            ? anonymizedName
+            : Path.Combine(directory, anonymizedName);
+    }
+}

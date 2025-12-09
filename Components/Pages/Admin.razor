@@ -1,0 +1,314 @@
+@page "/admin"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Administrator")]
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using GrokBlazorApp.Data
+@using Microsoft.AspNetCore.Components.Authorization
+
+@inject IDbContextFactory<ApplicationDbContext> DbContextFactory
+@inject IServiceScopeFactory ScopeFactory
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+<PageTitle>Manage Guests</PageTitle>
+
+<h3>Manage Guests</h3>
+
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>Add New Guest</h5>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-6">
+                <label class="form-label">Email</label>
+                <input type="email" class="form-control" @bind="newGuestEmail" placeholder="guest@example.com" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Default Password</label>
+                <div class="input-group">
+                    <input type="text" class="form-control" @bind="defaultPassword" readonly />
+                    <button class="btn btn-outline-secondary" type="button" @onclick="GeneratePassword">
+                        <span>Generate</span>
+                    </button>
+                </div>
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+                <button class="btn btn-primary w-100" @onclick="AddGuest">Add Guest</button>
+            </div>
+        </div>
+        <small class="text-muted">The guest will be required to change this password on first login.</small>
+    </div>
+</div>
+
+@if (guestUsers.Any())
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Email</th>
+                <th>User Name</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var user in guestUsers)
+            {
+                <tr>
+                    <td>@user.Email</td>
+                    <td>@user.UserName</td>
+                    <td>
+                        @if (user.MustChangePassword)
+                        {
+                            <span class="badge bg-warning text-dark">Password Reset Required</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-success">Active</span>
+                        }
+                    </td>
+                    <td>
+                        <button class="btn btn-warning btn-sm me-2" @onclick="() => ResetPassword(user.Id)">Reset Password</button>
+                        <button class="btn btn-danger btn-sm" @onclick="() => DeleteUser(user.Id)">Delete</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+else
+{
+    <p>No guest users found.</p>
+}
+
+@if (!string.IsNullOrEmpty(tempPassword))
+{
+    <div class="alert alert-info mt-3">
+        <strong>Temporary Password:</strong> <code>@tempPassword</code>
+        <br /><small>Please share this password with the guest. They will be required to change it on first login.</small>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(statusMessage))
+{
+    <div class="alert alert-success mt-3">@statusMessage</div>
+}
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="alert alert-danger mt-3">@errorMessage</div>
+}
+
+@code {
+    private List<ApplicationUser> guestUsers = new();
+    private string statusMessage = string.Empty;
+    private string errorMessage = string.Empty;
+    private string newGuestEmail = string.Empty;
+    private string defaultPassword = string.Empty;
+    private string tempPassword = string.Empty;
+    private static readonly Random _random = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        GeneratePassword();
+        await LoadGuestUsers();
+    }
+
+    private void GeneratePassword()
+    {
+        // Generate a random password: 8 chars with letters, numbers, and special char
+        const string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const string lower = "abcdefghijklmnopqrstuvwxyz";
+        const string digits = "0123456789";
+        const string special = "!@#$%";
+
+        var password = new char[10];
+        password[0] = upper[_random.Next(upper.Length)];
+        password[1] = lower[_random.Next(lower.Length)];
+        password[2] = digits[_random.Next(digits.Length)];
+        password[3] = special[_random.Next(special.Length)];
+
+        const string all = upper + lower + digits;
+        for (int i = 4; i < 10; i++)
+        {
+            password[i] = all[_random.Next(all.Length)];
+        }
+
+        // Shuffle the password
+        for (int i = password.Length - 1; i > 0; i--)
+        {
+            int j = _random.Next(i + 1);
+            (password[i], password[j]) = (password[j], password[i]);
+        }
+
+        defaultPassword = new string(password);
+    }
+
+    private async Task AddGuest()
+    {
+        errorMessage = string.Empty;
+        statusMessage = string.Empty;
+        tempPassword = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(newGuestEmail))
+        {
+            errorMessage = "Email is required.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(defaultPassword))
+        {
+            errorMessage = "Password is required. Click Generate to create one.";
+            return;
+        }
+
+        try
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+
+            var existingUser = await userManager.FindByEmailAsync(newGuestEmail);
+            if (existingUser != null)
+            {
+                errorMessage = "A user with this email already exists.";
+                return;
+            }
+
+            var user = new ApplicationUser
+            {
+                UserName = newGuestEmail,
+                Email = newGuestEmail,
+                EmailConfirmed = true,
+                MustChangePassword = true
+            };
+
+            var result = await userManager.CreateAsync(user, defaultPassword);
+            if (result.Succeeded)
+            {
+                await userManager.AddToRoleAsync(user, "Guest");
+                tempPassword = defaultPassword;
+                statusMessage = $"Guest {newGuestEmail} added successfully.";
+                newGuestEmail = string.Empty;
+                GeneratePassword();
+                await LoadGuestUsers();
+            }
+            else
+            {
+                errorMessage = string.Join(", ", result.Errors.Select(e => e.Description));
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error adding guest: {ex.Message}";
+        }
+    }
+
+    private async Task ResetPassword(string userId)
+    {
+        errorMessage = string.Empty;
+        statusMessage = string.Empty;
+        tempPassword = string.Empty;
+
+        try
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await userManager.FindByIdAsync(userId);
+
+            if (user != null)
+            {
+                // Generate a new temporary password
+                GeneratePassword();
+                var newPassword = defaultPassword;
+
+                // Remove existing password and set new one
+                var token = await userManager.GeneratePasswordResetTokenAsync(user);
+                var result = await userManager.ResetPasswordAsync(user, token, newPassword);
+
+                if (result.Succeeded)
+                {
+                    // Set MustChangePassword flag
+                    user.MustChangePassword = true;
+                    await userManager.UpdateAsync(user);
+
+                    tempPassword = newPassword;
+                    statusMessage = $"Password reset for {user.Email}.";
+                    GeneratePassword(); // Generate a new one for the next action
+                    await LoadGuestUsers();
+                }
+                else
+                {
+                    errorMessage = string.Join(", ", result.Errors.Select(e => e.Description));
+                }
+            }
+            else
+            {
+                errorMessage = "User not found.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error resetting password: {ex.Message}";
+        }
+    }
+
+    private async Task LoadGuestUsers()
+    {
+        using var scope = ScopeFactory.CreateScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var users = await userManager.Users.ToListAsync();
+        var guestUsersList = new List<ApplicationUser>();
+        foreach (var u in users)
+        {
+            if (await userManager.IsInRoleAsync(u, "Guest"))
+            {
+                guestUsersList.Add(u);
+            }
+        }
+        guestUsers = guestUsersList;
+    }
+
+    private async Task DeleteUser(string userId)
+    {
+        errorMessage = string.Empty;
+        statusMessage = string.Empty;
+        tempPassword = string.Empty;
+
+        try
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await userManager.FindByIdAsync(userId);
+            if (user != null)
+            {
+                // Delete user's files first
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                var userFiles = dbContext.UserFiles.Where(f => f.UserId == userId);
+                dbContext.UserFiles.RemoveRange(userFiles);
+                await dbContext.SaveChangesAsync();
+
+                var result = await userManager.DeleteAsync(user);
+                if (result.Succeeded)
+                {
+                    statusMessage = $"User {user.Email} deleted successfully.";
+                    await LoadGuestUsers();
+                }
+                else
+                {
+                    errorMessage = string.Join(", ", result.Errors.Select(e => e.Description));
+                }
+            }
+            else
+            {
+                errorMessage = "User not found.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error deleting user: {ex.Message}";
+        }
+    }
+}

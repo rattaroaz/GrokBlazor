@@ -1,0 +1,375 @@
+@page "/conversion"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Guest")]
+@using System.Text
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using GrokBlazorApp.Data
+@using GrokBlazorApp.Services
+@using System.IO
+@inject IDbContextFactory<ApplicationDbContext> DbContextFactory
+@inject IServiceScopeFactory ScopeFactory
+@inject ILogger<Conversion> Logger
+@inject ILocalTextExtractionService TextExtractionService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Convert Files to Text</PageTitle>
+
+<h3>Convert Files to TXT</h3>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h4>Convertible Files</h4>
+                @if (convertibleFiles.Any())
+                {
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Select</th>
+                                <th>Label</th>
+                                <th>File Name</th>
+                                <th>Upload Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var file in convertibleFiles)
+                            {
+                                <tr>
+                                    <td>
+                                        <input type="checkbox"
+                                               checked="@selectedFileIds.Contains(file.Id)"
+                                               @onchange="(ChangeEventArgs e) => OnFileSelectionChanged(e, file.Id)" />
+                                    </td>
+                                    <td>@file.Label</td>
+                                    <td>@file.FileName</td>
+                                    <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                else
+                {
+                    <p>No files available for conversion.</p>
+                }
+
+                <button @onclick="ConvertSelectedFiles"
+                        class="btn btn-primary"
+                        disabled=@(isConverting || !convertibleFiles.Any())>
+                    @if (isConverting)
+                    {
+                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        @:Converting...
+                    }
+                    else
+                    {
+                        @:Convert to TXT
+                    }
+                </button>
+
+                <button @onclick="DownloadSelectedConvertibleFiles"
+                        class="btn btn-outline-secondary ms-2"
+                        disabled="@(selectedFileIds == null || !selectedFileIds.Any())">
+                    Download Selected Originals
+                </button>
+
+                @if (!string.IsNullOrEmpty(statusMessage))
+                {
+                    <div class="alert alert-success mt-3">@statusMessage</div>
+                }
+
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="alert alert-danger mt-3">@errorMessage</div>
+                }
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h4>Converted Files</h4>
+                @if (convertedFiles.Any())
+                {
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Select</th>
+                                <th>Label</th>
+                                <th>File Name</th>
+                                <th>Upload Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var file in convertedFiles)
+                            {
+                                <tr>
+                                    <td>
+                                        <input type="checkbox"
+                                               checked="@selectedConvertedFileIds.Contains(file.Id)"
+                                               @onchange="(ChangeEventArgs e) => OnConvertedFileSelectionChanged(e, file.Id)" />
+                                    </td>
+                                    <td>@file.Label</td>
+                                    <td>@file.FileName</td>
+                                    <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                else
+                {
+                    <p>No converted files.</p>
+                }
+
+                <button @onclick="DownloadSelectedConvertedFiles"
+                        class="btn btn-secondary mt-3"
+                        disabled="@(!selectedConvertedFileIds.Any())">
+                    Download Selected TXT
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+@code {
+    private List<UserFile> convertibleFiles = new List<UserFile>(); // Files available for conversion (non-txt)
+    private List<UserFile> convertedFiles = new List<UserFile>(); // Converted files (txt)
+    private HashSet<int> selectedFileIds = new();
+    private HashSet<int> selectedConvertedFileIds = new();
+    private bool isConverting = false;
+    private string statusMessage = string.Empty;
+    private string errorMessage = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadUserFiles();
+    }
+
+    private async Task LoadUserFiles()
+    {
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        if (user.Identity?.IsAuthenticated == true)
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+
+            if (!string.IsNullOrEmpty(userId))
+            {
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                var allFiles = await dbContext.UserFiles.Where(f => f.UserId == userId).OrderByDescending(f => f.UploadDate).ToListAsync();
+                convertibleFiles = allFiles.Where(f => !Path.GetExtension(f.FileName).Equals(".txt", StringComparison.OrdinalIgnoreCase)).ToList();
+                convertedFiles = allFiles.Where(f => Path.GetExtension(f.FileName).Equals(".txt", StringComparison.OrdinalIgnoreCase)).ToList();
+                Logger.LogInformation("Loaded {Count} files for user {UserId} in Conversion component.", allFiles.Count, userId);
+            }
+            else
+            {
+                Logger.LogWarning("User ID is null in Conversion.LoadUserFiles.");
+            }
+        }
+        else
+        {
+            Logger.LogWarning("User not authenticated in Conversion.LoadUserFiles.");
+        }
+    }
+
+    private void ToggleSelection(int fileId, bool isSelected)
+    {
+        if (isSelected)
+        {
+            selectedFileIds.Add(fileId);
+        }
+        else
+        {
+            selectedFileIds.Remove(fileId);
+        }
+    }
+
+    private void OnFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        ToggleSelection(fileId, isSelected);
+    }
+
+    private void OnConvertedFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        if (isSelected)
+        {
+            selectedConvertedFileIds.Add(fileId);
+        }
+        else
+        {
+            selectedConvertedFileIds.Remove(fileId);
+        }
+    }
+
+    private async Task ConvertSelectedFiles()
+    {
+        errorMessage = string.Empty;
+        statusMessage = string.Empty;
+        isConverting = true;
+
+        try
+        {
+            var filesToConvert = selectedFileIds.Any() ? convertibleFiles.Where(f => selectedFileIds.Contains(f.Id)).ToList() : convertibleFiles.ToList();
+
+            if (!filesToConvert.Any())
+            {
+                statusMessage = "No files were converted.";
+                return;
+            }
+
+            using var dbContext = await DbContextFactory.CreateDbContextAsync();
+            int createdCount = 0;
+
+            foreach (var file in filesToConvert)
+            {
+                if (file.Content == null || file.Content.Length == 0)
+                {
+                    Logger.LogWarning("File {FileId} has no content; skipping conversion.", file.Id);
+                    continue;
+                }
+
+                var extractedText = await TextExtractionService.ExtractTextAsync(file.FileName ?? string.Empty, file.Content);
+
+                if (string.IsNullOrWhiteSpace(extractedText) ||
+                    extractedText.StartsWith("Error extracting text:", StringComparison.OrdinalIgnoreCase) ||
+                    extractedText.Equals("Unsupported file type for text extraction.", StringComparison.OrdinalIgnoreCase))
+                {
+                    Logger.LogWarning("Conversion failed for file {FileId}: {Message}", file.Id, extractedText);
+                    errorMessage = "Conversion failed for one or more files. Please try again or check the server logs.";
+                    continue;
+                }
+
+                var txtFile = new UserFile
+                {
+                    UserId = file.UserId,
+                    FileName = Path.ChangeExtension(file.FileName ?? "converted.txt", ".txt"),
+                    Label = $"{file.Label} (text extracted)",
+                    Content = Encoding.UTF8.GetBytes(extractedText),
+                    UploadDate = DateTime.UtcNow
+                };
+
+                dbContext.UserFiles.Add(txtFile);
+                createdCount++;
+            }
+
+            if (createdCount > 0)
+            {
+                await dbContext.SaveChangesAsync();
+                statusMessage = $"Created {createdCount} txt file(s). Reloaded.";
+                await LoadUserFiles();
+                selectedFileIds.Clear();
+            }
+            else
+            {
+                statusMessage = "No files were converted.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error during file conversion.");
+            errorMessage = $"Conversion failed: {ex.Message}";
+        }
+        finally
+        {
+            isConverting = false;
+        }
+    }
+
+    private async Task DownloadSelectedConvertedFiles()
+    {
+        if (!selectedConvertedFileIds.Any())
+        {
+            errorMessage = "No files selected for download.";
+            return;
+        }
+
+        try
+        {
+            using var dbContext = await DbContextFactory.CreateDbContextAsync();
+            var filesToDownload = convertedFiles.Where(f => selectedConvertedFileIds.Contains(f.Id)).ToList();
+
+            foreach (var file in filesToDownload)
+            {
+                if (file.Content != null && file.Content.Length > 0)
+                {
+                    var base64Content = Convert.ToBase64String(file.Content);
+                    await JSRuntime.InvokeVoidAsync("downloadFile", file.FileName, base64Content);
+                }
+            }
+
+            statusMessage = $"Downloaded {filesToDownload.Count} file(s).";
+            selectedConvertedFileIds.Clear();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error downloading files.");
+            errorMessage = $"Download failed: {ex.Message}";
+        }
+    }
+
+    private async Task DownloadSelectedConvertibleFiles()
+    {
+        if (!selectedFileIds.Any())
+        {
+            errorMessage = "No files selected for download.";
+            return;
+        }
+
+        try
+        {
+            var filesToDownload = convertibleFiles
+                .Where(f => selectedFileIds.Contains(f.Id))
+                .ToList();
+
+            foreach (var file in filesToDownload)
+            {
+                if (file.Content != null && file.Content.Length > 0)
+                {
+                    var base64Content = Convert.ToBase64String(file.Content);
+                    await JSRuntime.InvokeVoidAsync("downloadFile", file.FileName, base64Content);
+                }
+            }
+
+            statusMessage = $"Downloaded {filesToDownload.Count} file(s).";
+            selectedFileIds.Clear();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error downloading convertible files.");
+            errorMessage = $"Download failed: {ex.Message}";
+        }
+    }
+}

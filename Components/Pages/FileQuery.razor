@@ -1,0 +1,153 @@
+@page "/file-query"
+@rendermode InteractiveServer
+
+@using GrokBlazorApp.Services
+@using Microsoft.AspNetCore.Components.Forms
+@using Markdig
+@using Microsoft.AspNetCore.Authorization
+@attribute [Authorize(Roles = "Guest")]
+@inject IGrokApiService GrokService
+
+<PageTitle>File Query</PageTitle>
+
+<div>
+    <label for="files">Upload files:</label>
+    <InputFile id="files" multiple OnChange="HandleFileSelection" />
+</div>
+
+<div>
+    <label for="question">Enter your question:</label>
+    <input id="question" @bind="question" @onkeydown="HandleKeyDown" />
+    <button @onclick="GetResponse">Send</button>
+</div>
+
+@if (selectedFiles.Any())
+{
+    <h3>Selected Files:</h3>
+    <ul>
+        @foreach (var file in selectedFiles)
+        {
+            <li>@file.Name (@file.Size bytes, @file.ContentType) <button @onclick="() => RemoveFile(file)">Remove</button></li>
+        }
+    </ul>
+}
+
+@if (isLoading)
+{
+    <p>Loading...</p>
+}
+
+@if (chatHistory.Any())
+{
+    @foreach (var message in chatHistory.AsEnumerable().Reverse())
+    {
+        if (message.role == "system")
+        {
+            // Optionally hide system messages
+        }
+        else if (message.role == "user")
+        {
+            <div><strong>You:</strong> @message.content</div>
+        }
+        else if (message.role == "assistant")
+        {
+            <div><strong>Grok:</strong></div>
+            <div>@((MarkupString)Markdown.ToHtml(message.content))</div>
+        }
+        <hr />
+    }
+}
+
+@code {
+    private List<IBrowserFile> selectedFiles = new();
+    private string question = string.Empty;
+    private bool isLoading = false;
+    private List<Message> chatHistory = new();
+    private bool filesProcessed = false;
+
+    private void HandleFileSelection(InputFileChangeEventArgs e)
+    {
+        selectedFiles.AddRange(e.GetMultipleFiles());
+        filesProcessed = false;
+        chatHistory = new List<Message>();
+        this.StateHasChanged();
+    }
+
+    private void RemoveFile(IBrowserFile file)
+    {
+        selectedFiles.Remove(file);
+        filesProcessed = false;
+        chatHistory = new List<Message>();
+        this.StateHasChanged();
+    }
+
+    private async Task GetResponse()
+    {
+        if (isLoading)
+        {
+            return;
+        }
+
+        // Proceed only if there are files (allow blank question if files present)
+        if (!selectedFiles.Any())
+        {
+            // Handle error
+            return;
+        }
+
+        var currentQuestion = question;
+        question = string.Empty;
+
+        if (!string.IsNullOrWhiteSpace(currentQuestion))
+        {
+            chatHistory.Add(new Message("user", currentQuestion.Trim()));
+        }
+
+        isLoading = true;
+        StateHasChanged();
+        await Task.Yield();
+
+        try
+        {
+            if (!filesProcessed)
+            {
+                string fileContents = "";
+                foreach (var file in selectedFiles)
+                {
+                    try
+                    {
+                        using var reader = new StreamReader(file.OpenReadStream(10485760)); // 10MB limit
+                        string content = await reader.ReadToEndAsync();
+                        fileContents += $"File: {file.Name}\n{content}\n\n";
+                    }
+                    catch (Exception fileEx)
+                    {
+                        fileContents += $"File: {file.Name}\nError reading file: {fileEx.Message}\n\n";
+                    }
+                }
+                chatHistory.Insert(0, new Message("system", $"The following file contents are provided for context:\n\n{fileContents}"));
+                filesProcessed = true;
+            }
+
+            var response = await GrokService.GetChatCompletionAsync(chatHistory);
+            chatHistory.Add(new Message("assistant", response));
+        }
+        catch (Exception ex)
+        {
+            chatHistory.Add(new Message("assistant", $"Error: {ex.Message}"));
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await GetResponse();
+        }
+    }
+}

@@ -1,0 +1,367 @@
+@page "/upload"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Guest")]
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.AspNetCore.Components.Forms
+@using GrokBlazorApp.Data
+@inject IDbContextFactory<ApplicationDbContext> DbContextFactory
+@inject IServiceScopeFactory ScopeFactory
+@inject NavigationManager Navigation
+@inject ILogger<Upload> Logger
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Personal Files</PageTitle>
+
+<h3>Upload Personal Files</h3>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <h4>Upload New File</h4>
+        <EditForm Model="@uploadModel" OnValidSubmit="HandleUpload" FormName="uploadForm">
+            <DataAnnotationsValidator />
+            <ValidationSummary />
+
+            <div class="mb-3">
+                <InputFile OnChange="OnFileSelected" class="form-control" accept="*/*" />
+            </div>
+
+            <div class="mb-3">
+                <InputText @bind-Value="uploadModel.Label" class="form-control" placeholder="Enter a label for the file" @onkeydown="HandleKeyDown" />
+                <ValidationMessage For="@(() => uploadModel.Label)" />
+            </div>
+
+            <button type="submit" class="btn btn-primary" disabled="@isUploading">
+                @if (isUploading)
+                {
+                    <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    @:Uploading...
+                }
+                else
+                {
+                    @:Upload
+                }
+            </button>
+        </EditForm>
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger mt-3">@errorMessage</div>
+        }
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <h4>Your Files</h4>
+        @if (userFiles.Any())
+        {
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Select</th>
+                        <th>Label</th>
+                        <th>File Name</th>
+                        <th>Upload Date</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var file in userFiles)
+                    {
+                        <tr>
+                            <td>
+                                <input type="checkbox"
+                                       checked="@selectedFileIds.Contains(file.Id)"
+                                       @onchange="(ChangeEventArgs e) => OnFileSelectionChanged(e, file.Id)" />
+                            </td>
+                            <td>
+                                @if (editingFileId == file.Id)
+                                {
+                                    <div class="d-flex">
+                                        <input @bind="editLabel" class="form-control me-2" @onkeydown="(e) => HandleKeyDownEdit(e, file.Id)" />
+                                        <button @onclick="() => SaveLabel(file.Id)" class="btn btn-sm btn-outline-primary">Save</button>
+                                        <button @onclick="CancelEdit" class="btn btn-sm btn-outline-secondary ms-1">Cancel</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    @file.Label
+                                    <button @onclick="() => StartEdit(file.Id, file.Label)" class="btn btn-sm btn-outline-info ms-2">Edit</button>
+                                }
+                            </td>
+                            <td>@file.FileName</td>
+                            <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                            <td>
+                                <button @onclick="() => DeleteFile(file.Id)" class="btn btn-sm btn-danger"
+                                        disabled="@isDeleting.Contains(file.Id)">
+                                    @if (isDeleting.Contains(file.Id))
+                                    {
+                                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                                        @:Deleting...
+                                    }
+                                    else
+                                    {
+                                        @:Delete
+                                    }
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <button @onclick="DownloadSelectedFiles"
+                    class="btn btn-secondary mt-3"
+                    disabled="@(!selectedFileIds.Any())">
+                Download Selected
+            </button>
+        }
+        else
+        {
+            <p>No files uploaded yet.</p>
+        }
+    </div>
+</div>
+
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+@code {
+    private List<UserFile> userFiles = new();
+    private int? editingFileId;
+    private string editLabel = "";
+    private string errorMessage = "";
+    private UploadModel uploadModel = new();
+    private bool isUploading = false;
+    private HashSet<int> isDeleting = new();
+    private HashSet<int> selectedFileIds = new();
+
+    private class UploadModel
+    {
+        public IBrowserFile? File { get; set; }
+
+        public string Label { get; set; } = "";
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadUserFiles();
+    }
+
+    private async Task LoadUserFiles()
+    {
+        selectedFileIds.Clear();
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        if (user.Identity?.IsAuthenticated == true)
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+            
+            if (!string.IsNullOrEmpty(userId))
+            {
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                userFiles = await dbContext.UserFiles
+                    .Where(f => f.UserId == userId)
+                    .OrderByDescending(f => f.UploadDate)
+                    .ToListAsync();
+                Logger.LogInformation($"Loaded {userFiles.Count} files for user {userId}.");
+            }
+            else
+            {
+                Logger.LogWarning("User ID is null in LoadUserFiles.");
+            }
+        }
+        else
+        {
+            Logger.LogWarning("User not authenticated in LoadUserFiles.");
+        }
+    }
+
+    private void OnFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        if (isSelected)
+            selectedFileIds.Add(fileId);
+        else
+            selectedFileIds.Remove(fileId);
+    }
+
+    private async Task DownloadSelectedFiles()
+    {
+        if (!selectedFileIds.Any()) return;
+
+        try
+        {
+            var filesToDownload = userFiles.Where(f => selectedFileIds.Contains(f.Id)).ToList();
+            foreach (var file in filesToDownload)
+            {
+                if (file.Content != null && file.Content.Length > 0)
+                {
+                    var base64 = Convert.ToBase64String(file.Content);
+                    await JSRuntime.InvokeVoidAsync("downloadFile", file.FileName, base64);
+                }
+            }
+            selectedFileIds.Clear();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error downloading files.");
+            errorMessage = "Error downloading files: " + ex.Message;
+        }
+    }
+
+    private async Task HandleUpload()
+    {
+        errorMessage = "";
+        if (uploadModel.File == null || string.IsNullOrWhiteSpace(uploadModel.Label))
+            return;
+
+        isUploading = true;
+
+        try
+        {
+            Logger.LogInformation("Starting file upload for user.");
+            var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+            var user = authState.User;
+
+            if (!user.Identity?.IsAuthenticated == true)
+            {
+                Logger.LogWarning("User not authenticated, redirecting to login.");
+                Navigation.NavigateTo("/Identity/Account/Login", forceLoad: true);
+                return;
+            }
+
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+            
+            if (string.IsNullOrEmpty(userId))
+            {
+                Logger.LogError("User ID is null.");
+                errorMessage = "Unable to retrieve user ID.";
+                return;
+            }
+
+            Logger.LogInformation("Reading file stream.");
+            using var stream = uploadModel.File.OpenReadStream(maxAllowedSize: 50 * 1024 * 1024); // 50MB limit
+            using var memoryStream = new MemoryStream();
+            await stream.CopyToAsync(memoryStream);
+
+            var userFile = new UserFile
+            {
+                UserId = userId,
+                FileName = uploadModel.File.Name,
+                Label = uploadModel.Label,
+                Content = memoryStream.ToArray(),
+                UploadDate = DateTime.UtcNow
+            };
+
+            Logger.LogInformation("Saving to database.");
+            using var dbContext = await DbContextFactory.CreateDbContextAsync();
+            dbContext.UserFiles.Add(userFile);
+            await dbContext.SaveChangesAsync();
+            Logger.LogInformation("File saved successfully.");
+
+            // Reset form
+            uploadModel = new UploadModel();
+
+            await LoadUserFiles();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error during file upload.");
+            errorMessage = $"Upload failed: {ex.Message}";
+        }
+        finally
+        {
+            isUploading = false;
+        }
+    }
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        uploadModel.File = e.File;
+        uploadModel.Label = e.File.Name;
+    }
+
+    private void StartEdit(int fileId, string currentLabel)
+    {
+        editingFileId = fileId;
+        editLabel = currentLabel;
+    }
+
+    private void CancelEdit()
+    {
+        editingFileId = null;
+        editLabel = "";
+    }
+
+    private async Task SaveLabel(int fileId)
+    {
+        if (string.IsNullOrWhiteSpace(editLabel))
+            return;
+
+        var file = userFiles.FirstOrDefault(f => f.Id == fileId);
+        if (file != null)
+        {
+            using var dbContext = await DbContextFactory.CreateDbContextAsync();
+            dbContext.UserFiles.Attach(file);
+            file.Label = editLabel;
+            await dbContext.SaveChangesAsync();
+            editingFileId = null;
+            editLabel = "";
+        }
+    }
+
+    private async Task DeleteFile(int fileId)
+    {
+        isDeleting.Add(fileId);
+
+        try
+        {
+            var file = userFiles.FirstOrDefault(f => f.Id == fileId);
+            if (file != null)
+            {
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                dbContext.UserFiles.Remove(file);
+                await dbContext.SaveChangesAsync();
+                await LoadUserFiles();
+            }
+        }
+        finally
+        {
+            isDeleting.Remove(fileId);
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await HandleUpload();
+        }
+    }
+
+    private async Task HandleKeyDownEdit(KeyboardEventArgs e, int fileId)
+    {
+        if (e.Key == "Enter")
+        {
+            await SaveLabel(fileId);
+        }
+    }
+}

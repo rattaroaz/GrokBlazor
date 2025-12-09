@@ -1,0 +1,70 @@
+@page
+@model GrokBlazorApp.Areas.Identity.Pages.Account.AdminModel
+@using Microsoft.AspNetCore.Identity
+@using GrokBlazorApp.Data
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Panel</title>
+    <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="~/app.css" />
+</head>
+<body>
+    <div class="container mt-4">
+        <h3>Admin Panel</h3>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h4>Add Guest</h4>
+                <form method="post" asp-page-handler="AddGuest">
+                    <div class="mb-3">
+                        <label asp-for="NewGuestEmail" class="form-label">Email</label>
+                        <input asp-for="NewGuestEmail" class="form-control" type="email" />
+                    </div>
+                    <div class="mb-3">
+                        <label asp-for="NewGuestPassword" class="form-label">Password</label>
+                        <input asp-for="NewGuestPassword" class="form-control" type="password" />
+                    </div>
+                    <button type="submit" class="btn btn-primary">Add Guest</button>
+                </form>
+
+                @if (!string.IsNullOrEmpty(Model.AddMessage))
+                {
+                    <div class="alert @(Model.AddMessage.Contains("added") ? "alert-success" : "alert-danger") mt-3">
+                        @Model.AddMessage
+                    </div>
+                }
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <h4>Guests</h4>
+                @if (Model.Guests.Any())
+                {
+                    <ul class="list-group">
+                        @foreach (var guest in Model.Guests)
+                        {
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                @guest.Email
+                                <form method="post" asp-page-handler="RemoveGuest" asp-route-email="@guest.Email" style="display:inline;">
+                                    <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                                </form>
+                            </li>
+                        }
+                    </ul>
+                }
+                else
+                {
+                    <p>No guests.</p>
+                }
+            </div>
+        </div>
+
+        <div class="mt-3">
+            <a href="/" class="btn btn-secondary">Back to home</a>
+        </div>
+    </div>
+</body>
+</html>

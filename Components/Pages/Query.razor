@@ -1,0 +1,86 @@
+@page "/query"
+@rendermode InteractiveServer
+@using GrokBlazorApp.Services
+@using Markdig
+@using Microsoft.AspNetCore.Authorization
+@attribute [Authorize(Roles = "Guest")]
+@inject IGrokApiService GrokService
+
+<div>
+    <label for="prompt">Enter your prompt:</label>
+    <input id="prompt" @bind="prompt" @onkeydown="HandleKeyDown" />
+    <button @onclick="GetResponse">Send</button>
+</div>
+
+@if (isLoading)
+{
+    <p>Loading...</p>
+}
+
+@if (chatHistory.Any())
+{
+    @foreach (var message in chatHistory.AsEnumerable().Reverse())
+    {
+        if (message.role == "user")
+        {
+            <div><strong>You:</strong> @message.content</div>
+        }
+        else if (message.role == "assistant")
+        {
+            <div><strong>Grok:</strong></div>
+            <div>@((MarkupString)Markdown.ToHtml(message.content))</div>
+        }
+        <hr />
+    }
+}
+
+@code {
+    private string prompt = string.Empty;
+    private bool isLoading = false;
+    private List<Message> chatHistory = new();
+
+    private async Task GetResponse()
+    {
+        if (isLoading)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            // Handle error
+            return;
+        }
+
+        var currentPrompt = prompt.Trim();
+        prompt = string.Empty;
+        chatHistory.Add(new Message("user", currentPrompt));
+
+        isLoading = true;
+        StateHasChanged();
+        await Task.Yield();
+
+        try
+        {
+            var response = await GrokService.GetChatCompletionAsync(chatHistory);
+            chatHistory.Add(new Message("assistant", response));
+        }
+        catch (Exception ex)
+        {
+            chatHistory.Add(new Message("assistant", $"Error: {ex.Message}"));
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await GetResponse();
+        }
+    }
+}

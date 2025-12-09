@@ -1,0 +1,23 @@
+@page
+@model GrokBlazorApp.Areas.Identity.Pages.Account.LogoutModel
+@using Microsoft.AspNetCore.Identity
+@using GrokBlazorApp.Data
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Log out</title>
+    <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="~/app.css" />
+</head>
+<body>
+    <div class="container">
+        <h1>Log out</h1>
+        <p>Are you sure you want to log out?</p>
+        <form method="post">
+            <button type="submit" class="btn btn-danger">Log out</button>
+            <a href="/" class="btn btn-secondary">Cancel</a>
+        </form>
+    </div>
+</body>
+</html>

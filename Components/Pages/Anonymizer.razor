@@ -1,0 +1,385 @@
+@page "/anonymizer"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = "Guest")]
+@using System.Text
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using GrokBlazorApp.Data
+@using GrokBlazorApp.Services
+
+@inject IDbContextFactory<ApplicationDbContext> DbContextFactory
+@inject IServiceScopeFactory ScopeFactory
+@inject ILogger<Anonymizer> Logger
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject IJSRuntime JSRuntime
+@inject IAnonymizerService AnonymizerService
+
+<PageTitle>Anonymize TXT Files</PageTitle>
+
+<h3>Anonymize TXT Files</h3>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h4>Original TXT Files</h4>
+                @if (originalTxtFiles.Any())
+                {
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Select</th>
+                                <th>Label</th>
+                                <th>File Name</th>
+                                <th>Upload Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var file in originalTxtFiles)
+                            {
+                                <tr>
+                                    <td>
+                                        <input type="checkbox"
+                                               checked="@selectedOriginalFileIds.Contains(file.Id)"
+                                               @onchange="(ChangeEventArgs e) => OnOriginalFileSelectionChanged(e, file.Id)" />
+                                    </td>
+                                    <td>@file.Label</td>
+                                    <td>@file.FileName</td>
+                                    <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                else
+                {
+                    <p>No TXT files available for anonymization.</p>
+                }
+
+                <button @onclick="AnonymizeSelectedFiles"
+                        class="btn btn-primary"
+                        disabled="@(isAnonymizing || !originalTxtFiles.Any())">
+                    @if (isAnonymizing)
+                    {
+                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        @:Anonymizing...
+                    }
+                    else
+                    {
+                        @:Anonymize TXT Files
+                    }
+                </button>
+
+                <button @onclick="DownloadSelectedOriginalFiles"
+                        class="btn btn-outline-secondary ms-2"
+                        disabled="@(selectedOriginalFileIds == null || !selectedOriginalFileIds.Any())">
+                    Download Selected Originals
+                </button>
+
+                @if (!string.IsNullOrEmpty(statusMessage))
+                {
+                    <div class="alert alert-success mt-3">@statusMessage</div>
+                }
+
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="alert alert-danger mt-3">@errorMessage</div>
+                }
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h4>Anonymized TXT Files</h4>
+                @if (anonymizedTxtFiles.Any())
+                {
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Select</th>
+                                <th>Label</th>
+                                <th>File Name</th>
+                                <th>Upload Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var file in anonymizedTxtFiles)
+                            {
+                                <tr>
+                                    <td>
+                                        <input type="checkbox"
+                                               checked="@selectedAnonymizedFileIds.Contains(file.Id)"
+                                               @onchange="(ChangeEventArgs e) => OnAnonymizedFileSelectionChanged(e, file.Id)" />
+                                    </td>
+                                    <td>@file.Label</td>
+                                    <td>@file.FileName</td>
+                                    <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                else
+                {
+                    <p>No anonymized TXT files.</p>
+                }
+
+                <button @onclick="DownloadSelectedAnonymizedFiles"
+                        class="btn btn-secondary mt-3"
+                        disabled="@(!selectedAnonymizedFileIds.Any())">
+                    Download Selected Anonymized
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<UserFile> originalTxtFiles = new();
+    private List<UserFile> anonymizedTxtFiles = new();
+    private HashSet<int> selectedOriginalFileIds = new();
+    private HashSet<int> selectedAnonymizedFileIds = new();
+    private bool isAnonymizing = false;
+    private string statusMessage = string.Empty;
+    private string errorMessage = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadUserFiles();
+    }
+
+    private async Task LoadUserFiles()
+    {
+        selectedOriginalFileIds.Clear();
+        selectedAnonymizedFileIds.Clear();
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        if (user.Identity?.IsAuthenticated == true)
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+
+            if (!string.IsNullOrEmpty(userId))
+            {
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                var allFiles = await dbContext.UserFiles
+                    .Where(f => f.UserId == userId)
+                    .OrderByDescending(f => f.UploadDate)
+                    .ToListAsync();
+
+                originalTxtFiles = allFiles
+                    .Where(f => Path.GetExtension(f.FileName).Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                                && !Path.GetFileName(f.FileName).StartsWith("AN-", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                anonymizedTxtFiles = allFiles
+                    .Where(f => Path.GetExtension(f.FileName).Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                                && Path.GetFileName(f.FileName).StartsWith("AN-", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                Logger.LogInformation("Loaded {OriginalCount} original and {AnonymizedCount} anonymized TXT files for user {UserId} in Anonymizer component.",
+                    originalTxtFiles.Count, anonymizedTxtFiles.Count, userId);
+            }
+            else
+            {
+                Logger.LogWarning("User ID is null in Anonymizer.LoadUserFiles.");
+            }
+        }
+        else
+        {
+            Logger.LogWarning("User not authenticated in Anonymizer.LoadUserFiles.");
+        }
+    }
+
+    private void OnOriginalFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        if (isSelected)
+        {
+            selectedOriginalFileIds.Add(fileId);
+        }
+        else
+        {
+            selectedOriginalFileIds.Remove(fileId);
+        }
+    }
+
+    private void OnAnonymizedFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        if (isSelected)
+        {
+            selectedAnonymizedFileIds.Add(fileId);
+        }
+        else
+        {
+            selectedAnonymizedFileIds.Remove(fileId);
+        }
+    }
+
+    private async Task DownloadSelectedOriginalFiles()
+    {
+        if (!selectedOriginalFileIds.Any()) return;
+
+        try
+        {
+            var filesToDownload = originalTxtFiles.Where(f => selectedOriginalFileIds.Contains(f.Id)).ToList();
+            foreach (var file in filesToDownload)
+            {
+                if (file.Content != null && file.Content.Length > 0)
+                {
+                    var base64 = Convert.ToBase64String(file.Content);
+                    await JSRuntime.InvokeVoidAsync("downloadFile", file.FileName, base64);
+                }
+            }
+            statusMessage = $"Downloaded {filesToDownload.Count} original file(s).";
+            selectedOriginalFileIds.Clear();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error downloading original files.");
+            errorMessage = "Error downloading original files: " + ex.Message;
+        }
+    }
+
+    private async Task DownloadSelectedAnonymizedFiles()
+    {
+        if (!selectedAnonymizedFileIds.Any()) return;
+
+        try
+        {
+            var filesToDownload = anonymizedTxtFiles.Where(f => selectedAnonymizedFileIds.Contains(f.Id)).ToList();
+            foreach (var file in filesToDownload)
+            {
+                if (file.Content != null && file.Content.Length > 0)
+                {
+                    var base64 = Convert.ToBase64String(file.Content);
+                    await JSRuntime.InvokeVoidAsync("downloadFile", file.FileName, base64);
+                }
+            }
+            statusMessage = $"Downloaded {filesToDownload.Count} anonymized file(s).";
+            selectedAnonymizedFileIds.Clear();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error downloading anonymized files.");
+            errorMessage = "Error downloading anonymized files: " + ex.Message;
+        }
+    }
+
+    private async Task AnonymizeSelectedFiles()
+    {
+        errorMessage = string.Empty;
+        statusMessage = string.Empty;
+        isAnonymizing = true;
+
+        try
+        {
+            var filesToAnonymize = selectedOriginalFileIds.Any()
+                ? originalTxtFiles.Where(f => selectedOriginalFileIds.Contains(f.Id)).ToList()
+                : originalTxtFiles.ToList();
+
+            if (!filesToAnonymize.Any())
+            {
+                statusMessage = "No files were anonymized.";
+                return;
+            }
+
+            using var dbContext = await DbContextFactory.CreateDbContextAsync();
+            int createdCount = 0;
+
+            foreach (var file in filesToAnonymize)
+            {
+                if (file.Content == null || file.Content.Length == 0)
+                {
+                    Logger.LogWarning("File {FileId} has no content; skipping anonymization.", file.Id);
+                    continue;
+                }
+
+                var originalText = Encoding.UTF8.GetString(file.Content);
+                var anonymizedText = AnonymizerService.AnonymizeText(originalText);
+
+                var anonymizedFile = new UserFile
+                {
+                    UserId = file.UserId,
+                    FileName = GetAnonymizedFileName(file.FileName),
+                    Label = $"{file.Label} (anonymized)",
+                    Content = Encoding.UTF8.GetBytes(anonymizedText),
+                    UploadDate = DateTime.UtcNow
+                };
+
+                dbContext.UserFiles.Add(anonymizedFile);
+                createdCount++;
+            }
+
+            if (createdCount > 0)
+            {
+                await dbContext.SaveChangesAsync();
+                statusMessage = $"Created {createdCount} anonymized txt file(s). Reloaded.";
+                await LoadUserFiles();
+                selectedOriginalFileIds.Clear();
+            }
+            else
+            {
+                statusMessage = "No files were anonymized.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error during file anonymization.");
+            errorMessage = $"Anonymization failed: {ex.Message}";
+        }
+        finally
+        {
+            isAnonymizing = false;
+        }
+    }
+
+    private static string GetAnonymizedFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return "AN-anonymized.txt";
+        }
+
+        var directory = Path.GetDirectoryName(fileName);
+        var nameOnly = Path.GetFileName(fileName);
+
+        if (nameOnly.StartsWith("AN-", StringComparison.OrdinalIgnoreCase))
+        {
+            return fileName;
+        }
+
+        var anonymizedName = "AN-" + nameOnly;
+        return string.IsNullOrEmpty(directory)
+            ? anonymizedName
+            : Path.Combine(directory, anonymizedName);
+    }
+}

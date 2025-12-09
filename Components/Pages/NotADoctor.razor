@@ -1,0 +1,262 @@
+@page "/not-a-doctor"
+@rendermode InteractiveServer
+
+@using Services
+@using Microsoft.AspNetCore.Components.Forms
+@using Markdig
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@using GrokBlazorApp.Data
+@attribute [Authorize(Roles = "Guest")]
+@inject IGrokApiService GrokService
+@inject IDbContextFactory<ApplicationDbContext> DbContextFactory
+@inject IServiceScopeFactory ScopeFactory
+@inject ILogger<NotADoctor> Logger
+
+<PageTitle>Not A Doctor</PageTitle>
+
+<div>
+    <h3>Your Personal Files</h3>
+    @if (userFiles.Any())
+    {
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Select</th>
+                    <th>Label</th>
+                    <th>File Name</th>
+                    <th>Upload Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var file in userFiles)
+                {
+                    <tr>
+                        <td>
+                            <input type="checkbox" checked="@selectedFileIds.Contains(file.Id)" @onchange="(ChangeEventArgs e) => OnFileSelectionChanged(e, file.Id)" />
+                        </td>
+                        <td>@file.Label</td>
+                        <td>@file.FileName</td>
+                        <td>@file.UploadDate.ToString("yyyy-MM-dd HH:mm")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    else
+    {
+        <p>No files available.</p>
+    }
+</div>
+
+<div>
+    <label for="question">Enter your question:</label>
+    <input id="question" @bind="question" class="form-control" @onkeydown="HandleKeyDown" />
+    <button @onclick="GetResponse" class="btn btn-primary" disabled="@isLoading">
+        @if (isLoading)
+        {
+            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+            @:Sending...
+        }
+        else
+        {
+            @:Send
+        }
+    </button>
+</div>
+
+@if (isLoading)
+{
+    <p>Loading...</p>
+}
+
+@if (chatHistory.Any())
+{
+    @foreach (var pair in GetQuestionAnswerPairs())
+    {
+        <div class="card mb-3">
+            <div class="card-header bg-primary text-white">
+                <strong>You:</strong> @pair.Question
+            </div>
+            <div class="card-body">
+                <div><strong>Grok:</strong></div>
+                <div>@((MarkupString)Markdown.ToHtml(pair.Answer))</div>
+            </div>
+        </div>
+    }
+}
+
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+@code {
+    private List<UserFile> userFiles = new();
+    private HashSet<int> selectedFileIds = new();
+    private string question = string.Empty;
+    private bool isLoading = false;
+    private List<Message> chatHistory = new();
+
+    private record QuestionAnswerPair(string Question, string Answer);
+
+    private IEnumerable<QuestionAnswerPair> GetQuestionAnswerPairs()
+    {
+        var pairs = new List<QuestionAnswerPair>();
+        string? currentQuestion = null;
+
+        foreach (var message in chatHistory)
+        {
+            if (message.role == "user")
+            {
+                currentQuestion = message.content;
+            }
+            else if (message.role == "assistant" && currentQuestion != null)
+            {
+                pairs.Add(new QuestionAnswerPair(currentQuestion, message.content));
+                currentQuestion = null;
+            }
+        }
+
+        // Return in reverse order so newest Q&A is first
+        pairs.Reverse();
+        return pairs;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadUserFiles();
+    }
+
+    private async Task LoadUserFiles()
+    {
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        if (user.Identity?.IsAuthenticated == true)
+        {
+            using var scope = ScopeFactory.CreateScope();
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var userId = userManager.GetUserId(user);
+            
+            if (!string.IsNullOrEmpty(userId))
+            {
+                using var dbContext = await DbContextFactory.CreateDbContextAsync();
+                userFiles = await dbContext.UserFiles
+                    .Where(f => f.UserId == userId)
+                    .OrderByDescending(f => f.UploadDate)
+                    .ToListAsync();
+                Logger.LogInformation($"Loaded {userFiles.Count} files for user {userId}.");
+            }
+            else
+            {
+                Logger.LogWarning("User ID is null in LoadUserFiles.");
+            }
+        }
+        else
+        {
+            Logger.LogWarning("User not authenticated in LoadUserFiles.");
+        }
+    }
+
+    private void ToggleSelection(int fileId, bool isSelected)
+    {
+        if (isSelected)
+        {
+            selectedFileIds.Add(fileId);
+        }
+        else
+        {
+            selectedFileIds.Remove(fileId);
+        }
+    }
+
+    private void OnFileSelectionChanged(ChangeEventArgs e, int fileId)
+    {
+        bool isSelected = false;
+
+        if (e.Value is bool b)
+        {
+            isSelected = b;
+        }
+        else if (e.Value is string s && bool.TryParse(s, out var parsed))
+        {
+            isSelected = parsed;
+        }
+
+        ToggleSelection(fileId, isSelected);
+    }
+
+    private async Task GetResponse()
+    {
+        if (!selectedFileIds.Any())
+        {
+            Logger.LogWarning("No files selected");
+            return;
+        }
+
+        Logger.LogInformation("Starting GetResponse - setting isLoading to true");
+        isLoading = true;
+        StateHasChanged();
+        await Task.Yield(); // Allow UI to update
+        try
+        {
+            // Process selected files
+            string fileContents = "";
+            Logger.LogInformation("Processing {Count} selected files", selectedFileIds.Count);
+            foreach (var fileId in selectedFileIds)
+            {
+                var file = userFiles.FirstOrDefault(f => f.Id == fileId);
+                if (file != null && file.Content != null)
+                {
+                    try
+                    {
+                        string content = System.Text.Encoding.UTF8.GetString(file.Content);
+                        if (content.Length > 10000) // Limit to 10KB text
+                        {
+                            content = content.Substring(0, 10000) + "\n[Content truncated due to size]";
+                        }
+                        fileContents += $"File: {file.FileName} (Label: {file.Label})\n{content}\n\n";
+                        Logger.LogInformation("Processed file: {FileName}, length: {Length}", file.FileName, content.Length);
+                    }
+                    catch (Exception ex)
+                    {
+                        fileContents += $"File: {file.FileName}\nError reading file: {ex.Message}\n\n";
+                        Logger.LogError(ex, "Error reading file {FileName}", file.FileName);
+                    }
+                }
+            }
+            chatHistory.Add(new Message("system", $"The following file contents are provided for context:\n\n{fileContents}"));
+
+            if (!string.IsNullOrWhiteSpace(question))
+            {
+                chatHistory.Add(new Message("user", question));
+                Logger.LogInformation("Added user question to chat history");
+            }
+
+            Logger.LogInformation("Calling Grok API with {MessageCount} messages", chatHistory.Count);
+            var response = await GrokService.GetChatCompletionAsync(chatHistory);
+            Logger.LogInformation("Received response from Grok API");
+            chatHistory.Add(new Message("assistant", response));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error in GetResponse");
+            chatHistory.Add(new Message("assistant", $"Error: {ex.Message}"));
+        }
+        finally
+        {
+            Logger.LogInformation("Setting isLoading to false");
+            isLoading = false;
+            question = string.Empty;
+            StateHasChanged();
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await GetResponse();
+        }
+    }
+}
