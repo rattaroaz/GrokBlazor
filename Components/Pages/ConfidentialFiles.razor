@@ -235,7 +235,7 @@
                 return;
             }
 
-            using var stream = uploadModel.File.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
+            using var stream = uploadModel.File.OpenReadStream(maxAllowedSize: 25 * 1024 * 1024); // 25MB limit
             using var memoryStream = new MemoryStream();
             await stream.CopyToAsync(memoryStream);
             var fileBytes = memoryStream.ToArray();

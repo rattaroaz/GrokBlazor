@@ -48,10 +48,10 @@ builder.Services.AddRazorComponents()
 
 builder.Services.Configure<CircuitOptions>(options => options.DetailedErrors = true);
 
-// Configure SignalR for larger file uploads (50MB)
+// Configure SignalR for larger file uploads (25MB)
 builder.Services.AddSignalR(options =>
 {
-    options.MaximumReceiveMessageSize = 50 * 1024 * 1024; // 50MB
+    options.MaximumReceiveMessageSize = 25 * 1024 * 1024; // 25MB
 });
 
 builder.Services.AddRazorPages();

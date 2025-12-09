@@ -142,7 +142,7 @@
             {
                 using var dbContext = await DbContextFactory.CreateDbContextAsync();
                 userFiles = await dbContext.UserFiles
-                    .Where(f => f.UserId == userId)
+                    .Where(f => f.UserId == userId && f.FileName.ToLower().EndsWith(".txt"))
                     .OrderByDescending(f => f.UploadDate)
                     .ToListAsync();
                 Logger.LogInformation($"Loaded {userFiles.Count} files for user {userId}.");
